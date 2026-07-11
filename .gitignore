@@ -1,0 +1,21 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+# Local firmware secrets/config
+firmware/src/config.h
+
+# PlatformIO build artifacts and vendored libdeps
+firmware/.pio/
+firmware/compile_commands.json
