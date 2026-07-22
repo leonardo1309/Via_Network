@@ -4,4 +4,13 @@ out = "out"
 libs = ["lib"]
 remappings = ["@openzeppelin/contracts=lib/openzeppelin-contracts/contracts"]
 
+[rpc_endpoints]
+anvil = "http://127.0.0.1:8545"
+celo_sepolia = "${CELO_SEPOLIA_RPC_URL}"
+celo = "${CELO_MAINNET_RPC_URL}"
+
+[etherscan]
+celo_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11142220 }
+celo = { key = "${ETHERSCAN_API_KEY}", chain = 42220 }
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
