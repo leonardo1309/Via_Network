@@ -1,0 +1,4 @@
+{
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/firmware/compile_commands.json",
+  "C_Cpp.errorSquiggles": "enabled"
+}

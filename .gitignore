@@ -19,3 +19,11 @@ firmware/src/config.h
 # PlatformIO build artifacts and vendored libdeps
 firmware/.pio/
 firmware/compile_commands.json
+
+# Relayer (Node/TypeScript)
+relayer/node_modules/
+relayer/dist/
+
+# Local Claude Code skill symlink — points to an absolute machine-specific path;
+# the real content is committed under .agents/skills/, this just gets regenerated locally.
+.claude/
