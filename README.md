@@ -24,7 +24,7 @@ truth for "this passenger, this bus, this fare," not whichever backend happens t
 - [Smart Contracts](#smart-contracts-foundry)
 - [Relayer](#relayer)
 - [Firmware](#firmware-esp32)
-- [Frontend](#frontend-flutter)
+- [Frontend](#frontend-minipay-mini-app)
 - [Networks](#networks)
 - [Project Status](#project-status)
 - [License](#license)
@@ -38,7 +38,7 @@ The repository has four independent subprojects, each with its own toolchain:
 | `src/`, `script/`, `test/` | Foundry / Solidity | The on-chain contract, `VIA_Operator` |
 | `firmware/` | C++ / PlatformIO / ESP32 | Physical validator firmware (ESP32 + PN532 RFID reader) |
 | `relayer/` | TypeScript / viem / Express | Pays gas on behalf of validators via Celo fee abstraction |
-| `frontend/` | Flutter (Dart) | Passenger-facing mobile app *(early prototype — see [Project Status](#project-status))* |
+| `frontend/` | Next.js / viem / TypeScript | "VIA Pay" — passenger-facing MiniPay Mini App |
 
 ### How a fare gets collected
 
@@ -64,7 +64,8 @@ and `deactivateBus` revokes a validator's role immediately if a device is lost o
 | [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`/`cast`/`anvil`) | Smart contracts | `curl -L https://foundry.paradigm.xyz \| bash && foundryup` |
 | [Node.js](https://nodejs.org/) 18+ | Relayer | — |
 | [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) (`pio`) | Firmware | `pip install -U platformio`, or the VS Code extension |
-| [Flutter](https://docs.flutter.dev/get-started/install) | Frontend | — |
+| [Node.js](https://nodejs.org/) 18+ | Frontend | — (same install as Relayer) |
+| [ngrok](https://ngrok.com/download) | Testing the Mini App inside MiniPay | — |
 
 > On Windows, Foundry and PlatformIO are commonly run from WSL / a Python virtualenv respectively — if
 > a command isn't found in your shell, check whether it was installed somewhere else before assuming
@@ -131,13 +132,28 @@ Cryptography (ABI encoding, transaction signing) is handled locally by the [Web3
 library; JSON-RPC transport is a small hand-rolled HTTP client, since Web3E's own RPC methods are
 TLS-only and don't recognize Anvil's or Celo's chain IDs.
 
-## Frontend (Flutter)
+## Frontend (MiniPay Mini App)
+
+"VIA Pay" — balance, a bounded top-up (approve exactly N rides' worth, never an unlimited allowance),
+and recent fare history, built to run inside [MiniPay](https://www.opera.com/products/minipay),
+Celo's stablecoin wallet. Plain [viem](https://viem.sh) talking to `window.ethereum` directly — no
+wagmi/RainbowKit, to keep the bundle under MiniPay's 2MB limit.
 
 ```bash
 cd frontend
-flutter pub get
-flutter run
+npm install
+cp .env.local.example .env.local   # NEXT_PUBLIC_RPC_URL, NEXT_PUBLIC_OPERATOR_ADDRESS
+npm run dev
 ```
+
+MiniPay requires a physical device and HTTPS — `localhost` doesn't work there:
+
+```bash
+npx ngrok http 3000
+```
+
+Open the ngrok HTTPS URL inside MiniPay (Settings → About → tap Version 7× to unlock Developer
+Settings → enable Developer Mode → Load Test Page).
 
 ## Networks
 
@@ -163,8 +179,8 @@ Actively developed under Celo's Proof of Ship program. Current state, honestly:
 - ✅ **Relayer** — functional fee-abstraction service for `collectFareWithSig`.
 - ✅ **Firmware** — validated end-to-end against a live ESP32 + Anvil (`collectFare` direct-call path).
   Signing the EIP-712 message for the relayer path instead of a raw transaction is still open work.
-- 🚧 **Frontend** — early prototype; predates the current contract design and needs a rewrite to match
-  (COPm balance, relayer-driven fare history) rather than the retired closed-loop token it still targets.
+- 🚧 **Frontend** — "VIA Pay" MiniPay Mini App built and passing build/lint; not yet deployed to any
+  network or tested inside MiniPay itself. Phone-number identity (ODIS) not yet integrated.
 
 ## License
 

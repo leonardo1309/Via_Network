@@ -17,7 +17,7 @@ The repo has four independent subprojects that don't share a build system:
 | `src/`, `script/`, `test/` (repo root) | Foundry / Solidity | The on-chain contract (`VIA_Operator`) |
 | `firmware/` | C++ / PlatformIO / ESP32 | Physical validator firmware |
 | `relayer/` | TypeScript / viem / Express | Pays gas on behalf of validators via Celo fee abstraction |
-| `frontend/` | Flutter (Dart) | Passenger-facing mobile app (early prototype, see Known gaps) |
+| `frontend/` | Next.js / viem / TypeScript | "VIA Pay" — passenger-facing MiniPay Mini App |
 
 `backend/` at the repo root is an empty leftover directory from an earlier plan — the real TypeScript
 service is `relayer/`, not `backend/`. Don't add code to `backend/`.
@@ -84,14 +84,29 @@ pio device monitor
 Requires `firmware/src/config.h` (gitignored — copy from `firmware/src/config.example.h` and fill in
 real WiFi/RPC/key values; it holds a plaintext private key and WiFi credentials).
 
-### Frontend (`frontend/`, Flutter)
+### Frontend (`frontend/`, Next.js MiniPay Mini App)
 
 ```bash
-flutter pub get
-flutter run
-flutter test
-flutter analyze
+cd frontend
+npm install
+cp .env.local.example .env.local   # NEXT_PUBLIC_RPC_URL, NEXT_PUBLIC_OPERATOR_ADDRESS
+npm run dev                        # then expose via ngrok to test inside MiniPay — see below
+npm run build && npm run lint
 ```
+
+No wagmi/RainbowKit — MiniPay Mini Apps talk to `window.ethereum` directly via plain viem
+(`minipay-scaffold-from-scratch.md` in the Celo skill recommends this over the general
+"use Wagmi for React" rule in `celopedia.md`, specifically for MiniPay's 2MB-bundle constraint).
+`lib/config.ts` reads `NEXT_PUBLIC_*` env vars **lazily** (not at module scope) — Next.js evaluates
+that file during the build/SSR static-generation pass, and throwing there breaks the build even
+though the page itself is `"use client"`. `isConfigured()` gates the UI instead.
+
+MiniPay requires a physical device and HTTPS — `localhost` doesn't work. Test with:
+```bash
+npx ngrok http 3000
+```
+then open the ngrok HTTPS URL inside MiniPay (Settings → About → tap Version 7× → Developer
+Settings → Load Test Page).
 
 ## Architecture
 
@@ -205,13 +220,31 @@ upstream or vendoring a patched fork if this keeps biting:**
   bytes from `R` and `S` before RLP-encoding them (mirroring what `export_bits_truncate()` already does
   for `V`/`value`, which is why those two fields were never affected).
 
-### Frontend (`frontend/`) — early prototype, out of sync
+### Frontend (`frontend/`) — "VIA Pay", a MiniPay Mini App
 
-`lib/core/blockchain_service.dart` talks to a hardcoded local Anvil RPC (`10.0.2.2:8545`, the Android
-emulator's host alias) using `web3dart` directly against `assets/via_abi.json`, which is the **old**
-VIAToken ERC20 ABI (`balanceOf`/`transfer`) and a stale contract address. This predates the
-`VIA_Operator`/COPm/relayer redesign and will need a rewrite (likely: read COPm balance directly, and
-drive fare-related actions through the relayer rather than reimplementing signing in Dart).
+Replaced the original Flutter app entirely (deleted, not migrated — it predated the current
+`VIA_Operator`/COPm design and there was nothing worth carrying over). Passengers never sign
+`collectFareWithSig` — that's the validator's job (see firmware/relayer above) — so the Mini App's
+only on-chain write is a plain `approve()`, which is fully compatible with MiniPay's hard block on
+`personal_sign`/`eth_signTypedData`.
+
+- `lib/config.ts` — chain (`celoSepolia`/`celo` from `NEXT_PUBLIC_CHAIN`), RPC URL, and
+  `VIA_Operator` address from env vars, read lazily (see Commands above for why).
+- `lib/minipay.ts` — `isMiniPay()` detection, a read-only `publicClient`, and a `walletClient` built
+  from `window.ethereum` (`custom()` transport) when present.
+- `lib/abi.ts` — the minimal ERC20 fragment (balance/allowance/approve/decimals/symbol) plus the
+  `VIA_Operator` fragment the passenger side actually needs (`getPaymentToken`, `getZonePrice`, the
+  `FarePaid` event) — deliberately excludes `collectFare*`.
+- `app/page.tsx` — balance, a bounded top-up (`approve()` for exactly N rides' worth, never
+  `type(uint256).max` — see the COPm security discussion this repo's history covers) via
+  `feeCurrency: token.address` (valid because COPm/USDm are 18-decimal Mento tokens where the fee
+  currency address equals the token address; a 6-decimal token like USDC/USDT would need the
+  adapter address instead, see `builder-guide.md`), and recent-fares history read from `FarePaid` logs.
+
+Known gaps: no phone-number identity yet (shows a truncated `0x…` address, which MiniPay only
+allows as a secondary hint, not primary — see `minipay-guide.md` → ODIS/FederatedAttestations for
+the real fix); footer support/ToS links are placeholders; not yet deployed anywhere (no Celo Sepolia
+or Mainnet `VIA_Operator` address to point it at — that's the next step).
 
 ### Networks
 
