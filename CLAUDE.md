@@ -17,7 +17,7 @@ The repo has four independent subprojects that don't share a build system:
 | `src/`, `script/`, `test/` (repo root) | Foundry / Solidity | The on-chain contract (`VIA_Operator`) |
 | `firmware/` | C++ / PlatformIO / ESP32 | Physical validator firmware |
 | `relayer/` | TypeScript / viem / Express | Pays gas on behalf of validators via Celo fee abstraction |
-| `frontend/` | Next.js / viem / TypeScript | "VIA Pay" — passenger-facing MiniPay Mini App |
+| `frontend/` | Next.js / wagmi / viem / TypeScript | "VIA Pay" — passenger-facing MiniPay Mini App |
 
 `backend/` at the repo root is an empty leftover directory from an earlier plan — the real TypeScript
 service is `relayer/`, not `backend/`. Don't add code to `backend/`.
@@ -48,12 +48,19 @@ forge test --match-test test_CollectFareWithSig_Success -vvv   # run a single te
 
 CI (`.github/workflows/test.yml`) runs exactly: `forge fmt --check`, `forge build --sizes`, `forge test -vvv`.
 
-Deploying `VIA_Operator` (`script/Deploy.s.sol`) requires `PRIVATE_KEY` and `TREASURY_ADDRESS` as env
-vars (see `.env.example`). The payment token address is **not** an env var — `script/HelperConfig.s.sol`
-resolves it from `block.chainid` (see Architecture below):
+Deploying `VIA_Operator` (`script/Deploy.s.sol`) requires `TREASURY_ADDRESS` as an env var (see
+`.env.example`). The payment token address is **not** an env var — `script/HelperConfig.s.sol`
+resolves it from `block.chainid` (see Architecture below).
+
+**Signing key**: `Deploy.s.sol` branches on `block.chainid` — on Anvil (`31337`) it signs with
+`PRIVATE_KEY` from `.env` (fine, it's just one of Anvil's public throwaway test keys); on any real
+network it calls `vm.startBroadcast()` with no arguments and expects `--account <name> --sender
+<address>` on the CLI instead, so a real private key never sits in `.env` in plaintext. Import a
+key into an encrypted keystore once with `cast wallet import <name> --interactive` (prompts for the
+key + an encryption password, stores it under `~/.foundry/keystores/`), then:
 
 ```bash
-forge script script/Deploy.s.sol --rpc-url celo_sepolia --broadcast --verify
+forge script script/Deploy.s.sol --rpc-url celo_sepolia --account via-deployer --sender <ADDRESS> --broadcast --verify
 ```
 
 `rpc_endpoints` and `[etherscan]` for `celo_sepolia` (11142220) and `celo` (42220) are already configured
@@ -94,19 +101,56 @@ npm run dev                        # then expose via ngrok to test inside MiniPa
 npm run build && npm run lint
 ```
 
-No wagmi/RainbowKit — MiniPay Mini Apps talk to `window.ethereum` directly via plain viem
-(`minipay-scaffold-from-scratch.md` in the Celo skill recommends this over the general
-"use Wagmi for React" rule in `celopedia.md`, specifically for MiniPay's 2MB-bundle constraint).
+Uses **wagmi** (`injected()` connector only — no RainbowKit, whose multi-wallet selector modal
+breaks MiniPay's required zero-click auto-connect) + `@tanstack/react-query`. An earlier version of
+this project avoided wagmi entirely, reasoning that MiniPay's "2MB" figure was a hard Mini App
+bundle cap — that's wrong: the 2MB figure is a marketing stat about the MiniPay **host app**, not a
+documented Mini App bundle limit (checked directly against `docs.minipay.xyz`'s best-practices and
+deployment pages, neither of which mention any such cap). MiniPay's own best-practices examples use
+wagmi hooks. `lib/wagmi.ts` registers the app's `Config` type via TypeScript module augmentation
+(`declare module "wagmi" { interface Register { config: typeof wagmiConfig } }`) — without this,
+wagmi's hooks fall back to a generic `Config` type and lose Celo's chain-specific `feeCurrency`
+field on transaction params. `useWriteContract` does **not** expose `feeCurrency` at all (not in its
+parameter type even with the chain registered), and **`useSendTransaction` accepts `feeCurrency` at
+the type level but silently drops it at runtime inside MiniPay** — confirmed on a real device: it
+submits a plain legacy tx demanding native CELO instead of the requested fee currency. The working
+fix was to stop using wagmi for this one call and build a plain
+`createWalletClient({ chain, transport: custom(window.ethereum) })` directly (see
+`lib/minipay.ts`'s `getWalletClient()`, used from `app/page.tsx`'s `topUp()`) — matching the exact
+pattern in the Celo skill's `minipay-guide.md` "Send Stablecoin Payment" example. wagmi is still used
+for connection state (`useAccount`/`useConnect`) and all reads (`useReadContract`/`useReadContracts`).
 `lib/config.ts` reads `NEXT_PUBLIC_*` env vars **lazily** (not at module scope) — Next.js evaluates
 that file during the build/SSR static-generation pass, and throwing there breaks the build even
 though the page itself is `"use client"`. `isConfigured()` gates the UI instead.
 
-MiniPay requires a physical device and HTTPS — `localhost` doesn't work. Test with:
+MiniPay requires a physical device and HTTPS — `localhost` doesn't work. **Test against a production
+build (`npm run build && npm run start`), never `npm run dev`** — confirmed empirically that Next's
+dev server (Turbopack HMR/Fast Refresh) breaks React re-rendering inside MiniPay's WebView: the app
+paints its initial state fine (proving hydration itself succeeds) but every subsequent `setState`
+silently fails to commit, freezing the UI on whatever rendered first (e.g. permanently stuck on
+"Conectando…") even though the underlying JS (timers, `window.ethereum` access) keeps running
+correctly underneath. This was confirmed by comparing React state against a plain `setInterval` +
+raw `textContent` counter injected outside React — the counter kept advancing while React's own
+output never changed. The dev server's `/_next/webpack-hmr` WebSocket also fails outright over an
+ngrok tunnel (visible in ngrok's request log as repeated `status_code: 0` upgrade attempts), which
+is the likely trigger. Switching to a production build resolved it completely — the passenger
+connected, balance/allowance loaded, and the UI updated normally. MiniPay's own WebView is a release
+build with `setWebContentsDebuggingEnabled` off (no `chrome://inspect` entry, even with the device
+authorized via `adb`), so this had to be diagnosed via a temporary in-page error catcher
+(`window.onerror`/`unhandledrejection` writing to a plain DOM node via a `beforeInteractive`
+`next/script`) rather than remote DevTools — that scaffolding was removed once the cause was found,
+except for the retry loop it led to (below).
+
 ```bash
-npx ngrok http 3000
+npm run build && npm run start   # or PORT=3001 npm run start to run alongside `next dev`
+npx ngrok http 3000              # (or 3001, matching whatever port start used)
 ```
 then open the ngrok HTTPS URL inside MiniPay (Settings → About → tap Version 7× → Developer
 Settings → Load Test Page).
+
+`app/page.tsx`'s wallet-detection effect retries for ~4s (polling every 200ms) instead of checking
+`window.ethereum` once on mount — some wallets inject their provider a moment after the page's first
+render, and a single synchronous check can race that and permanently report "no wallet".
 
 ## Architecture
 
@@ -115,8 +159,10 @@ Settings → Load Test Page).
 `VIAToken` (a closed-loop ERC20 the operator used to mint/burn) was **retired**. Fares are now paid in
 a real stablecoin pulled directly from the passenger:
 
-- `i_paymentToken` (immutable, set at deploy) — COPm on mainnet; **Celo Sepolia has no live Mento v3
-  COPm deployment**, so USDm is used there as a stand-in during testing (see Networks below).
+- `i_paymentToken` (immutable, set at deploy) — real COPm on both mainnet and Celo Sepolia (see
+  Networks below). Celo Sepolia has no Mento **v3** COPm deployment, but the **v2** one is live and
+  has real liquidity (confirmed via a manual Mento V2 swap, `v2-app.mento.org` — the newer V3 app at
+  `app.mento.org` has little/no liquidity yet on testnet for most pairs).
 - `s_treasury` (mutable, admin-settable via `setTreasury`) — the transport company's wallet. The
   contract **never holds passenger funds**; every charge is a direct
   `i_paymentToken.safeTransferFrom(user, s_treasury, price)`. Passengers must have pre-approved
@@ -158,7 +204,7 @@ just to `VIA_Operator.sol`:
 `struct NetworkConfig { address paymentToken; address treasury; }`. `HelperConfig`'s constructor
 branches on `block.chainid`:
 - `42220` (Celo Mainnet) → `getCeloMainnetConfig()`, hardcoded COPm address.
-- `11142220` (Celo Sepolia) → `getCeloSepoliaConfig()`, hardcoded USDm stand-in address.
+- `11142220` (Celo Sepolia) → `getCeloSepoliaConfig()`, hardcoded COPm address (the Mento v2 one).
 - anything else (Anvil, `31337`) → `getOrCreateAnvilConfig()`, which deploys a fresh
   `test/mocks/MockPaymentToken.sol` (a bare-bones mintable ERC20) and caches it in
   `activeNetworkConfig` so a second call in the same run doesn't redeploy it.
@@ -199,12 +245,48 @@ So `main.cpp` implements its own tiny JSON-RPC client (`rpcCall()` via `HTTPClie
 
 `main.cpp`'s `collectFare()` (renamed from the old `cobrarPasaje()`) now signs and submits a legacy tx
 calling the real `collectFare(address,uint256,uint256)` directly — validated end-to-end against a live
-ESP32 + Anvil (real `FarePaid` event, real ERC20 `Transfer`, not just a tx hash). It still calls the
-contract directly (`onlyRole(VALIDATOR_ROLE)`, pays its own gas in native CELO) rather than going through
-the relayer's `collectFareWithSig` meta-tx path — that rewrite (sign EIP-712, POST to
-`/collect-fare`) is still future work. Web3E's signing primitives (`Crypto::Keccak256` + the low-level
-`Sign` call) are reusable for it since EIP-712 ultimately signs a keccak256 digest the same way a raw tx
-does.
+ESP32 + a real Celo Sepolia deploy (real `FarePaid` event, real ERC20 `Transfer`, confirmed via
+`eth_getLogs` on the deployed contract, not just a tx hash). It still calls the contract directly
+(`onlyRole(VALIDATOR_ROLE)`, pays its own gas in native CELO) rather than going through the relayer's
+`collectFareWithSig` meta-tx path — that rewrite (sign EIP-712, POST to `/collect-fare`) is still future
+work. Web3E's signing primitives (`Crypto::Keccak256` + the low-level `Sign` call) are reusable for it
+since EIP-712 ultimately signs a keccak256 digest the same way a raw tx does.
+
+**`GAS_PRICE` in `config.h` is a hardcoded constant and *will* go stale** — hit this directly on a real
+device against Celo Sepolia: `GAS_PRICE` was 20 Gwei while the network's actual current price had
+drifted to 52.5 Gwei. The signed tx was still fully valid (correct signature, correct recovered sender,
+correct chain ID, correct calldata — verified independently with viem's `parseTransaction` +
+`recoverTransactionAddress`) and the RPC happily accepted it (`eth_sendRawTransaction` returned a real
+hash, logged as `[ÉXITO]`), but it just sat under-priced in the mempool indefinitely with no error ever
+surfacing back — `eth_getTransactionReceipt` kept returning `null` and the account's nonce never
+advanced. **A tx being accepted by the RPC is not proof it will ever be mined** — for a legacy/manually-
+signed tx specifically, check for a receipt (or the nonce advancing) before trusting `[ÉXITO]`. Fixed by
+`getNonceAndGasPrice()`, which calls `eth_gasPrice` (batched together with the nonce fetch, see below)
+before every `collectFare()` and signs with that value **+20%** headroom, falling back to the
+`GAS_PRICE` constant only if the RPC call itself fails.
+
+**`getNonceAndGasPrice()` batches the nonce + gas price fetch into one JSON-RPC array request**
+(`[{...eth_getTransactionCount...},{...eth_gasPrice...}]` in a single POST) instead of two sequential
+`rpcCall()`s — each call is a full TLS handshake from the ESP32 over Wi-Fi, which is the dominant
+source of the tap-to-confirmation delay (not the PN532 — a MIFARE read is sub-second even on a cheap
+module). `extractQuotedJsonField()` gained an optional `searchFrom`/`endPosOut` pair so the same
+`"result"` key can be pulled out twice from one batch response, in order, without a full JSON parser.
+
+**Real crash found while adding the batch call, in our own code (not Web3E) — a C++ destruction-order
+bug already latent in `rpcCall()` too**: both `rpcCall()` and `getNonceAndGasPrice()` declared
+`HTTPClient http` at the top of the function and `WiFiClientSecure client` *nested inside* the
+`if (RPC_USE_TLS)` block. `http.begin(client, url)` stores a reference to `client`; C++ destroys
+locals in reverse declaration order, so when the inner block's `}` closes, `client` — sitting in a
+narrower scope — is destroyed *before* the outer `http` is, at the end of the whole function.
+`HTTPClient`'s destructor then dereferences the now-dead `client` reference, reading freed stack
+memory. Confirmed on a real device with `xtensa-esp32-elf-addr2line` against the build's `.elf`:
+`Guru Meditation Error (LoadProhibited)` inside `~HTTPClient()`, called from `getNonceAndGasPrice()`
+right after a tap — the ESP32 silently rebooted mid-transaction with no error ever reaching Serial,
+which is why it looked identical to "nothing happened" until the full (unfiltered) boot log was
+captured. Fix: declare `client` in the **same, outer scope as `http`, before it** — reverse-order
+destruction then tears down `http` first (while `client` is still alive) and `client` after. Watch
+for this exact shape (`HTTPClient` + `WiFiClientSecure` where one is nested tighter than the other)
+in any future networking code here.
 
 **Two real bugs found in vendored Web3E, patched in `.pio/libdeps/*/Web3E/src/Contract.cpp` (all three
 PlatformIO envs) — these live in a gitignored, fetched dependency, so they're silently lost on any clean
@@ -230,21 +312,54 @@ only on-chain write is a plain `approve()`, which is fully compatible with MiniP
 
 - `lib/config.ts` — chain (`celoSepolia`/`celo` from `NEXT_PUBLIC_CHAIN`), RPC URL, and
   `VIA_Operator` address from env vars, read lazily (see Commands above for why).
-- `lib/minipay.ts` — `isMiniPay()` detection, a read-only `publicClient`, and a `walletClient` built
-  from `window.ethereum` (`custom()` transport) when present.
+- `lib/wagmi.ts` — `wagmiConfig` (single chain, `injected()` connector, `http(rpcUrl)` transport)
+  plus the `Register` module augmentation described above.
+- `app/providers.tsx` — client-component wrapper (`WagmiProvider` + `QueryClientProvider`),
+  mounted once in `app/layout.tsx` around `{children}`.
+- `lib/minipay.ts` — `isMiniPay()` detection and `hasInjectedProvider()`; no longer builds viem
+  clients directly (wagmi/`usePublicClient()` owns that now).
 - `lib/abi.ts` — the minimal ERC20 fragment (balance/allowance/approve/decimals/symbol) plus the
   `VIA_Operator` fragment the passenger side actually needs (`getPaymentToken`, `getZonePrice`, the
   `FarePaid` event) — deliberately excludes `collectFare*`.
-- `app/page.tsx` — balance, a bounded top-up (`approve()` for exactly N rides' worth, never
-  `type(uint256).max` — see the COPm security discussion this repo's history covers) via
-  `feeCurrency: token.address` (valid because COPm/USDm are 18-decimal Mento tokens where the fee
-  currency address equals the token address; a 6-decimal token like USDC/USDT would need the
-  adapter address instead, see `builder-guide.md`), and recent-fares history read from `FarePaid` logs.
+- `app/page.tsx` — zero-click auto-connect inside MiniPay via `useConnect`/`useAccount` (manual
+  "Conectar" button only renders when `!isMiniPay()`, so it never appears inside MiniPay even if
+  auto-connect fails, plus a ~4s retry loop polling for `window.ethereum` — some wallets inject it a
+  moment after first render, not before); balance/allowance/zone-price reads via
+  `useReadContract`/`useReadContracts`; a bounded top-up (`approve()` for exactly N rides' worth,
+  never `type(uint256).max` — see the COPm security discussion this repo's history covers); recent-
+  fares history read from `FarePaid` logs via `usePublicClient().getLogs` (kept as a plain viem call
+  — wagmi has no clean hook for an arbitrary historical block-range log query). Header logo is
+  `public/logo.png`; footer links to `/tos` and `/privacy` (drafted, pending legal review) and a
+  Telegram support handle. Tapping the truncated account address copies the full address to the
+  clipboard (MiniPay only allows truncated as primary display, but the full value still needs to be
+  reachable for e.g. sending funds to it from another wallet).
+
+  **The top-up transaction does NOT use wagmi's `useSendTransaction`** — confirmed on a real device
+  that it silently drops `feeCurrency` and submits a plain legacy tx requiring native CELO (which
+  MiniPay hides and passengers don't hold), even with the `wagmi` `Register` module augmentation in
+  place. Fixed by calling `lib/minipay.ts`'s `getWalletClient()` (a `createWalletClient({ chain,
+  transport: custom(window.ethereum) })` built directly, bypassing wagmi for this one call) and its
+  `.sendTransaction({ ..., feeCurrency })` — the same pattern `minipay-guide.md`'s own "Send
+  Stablecoin Payment" example uses. wagmi is still used for connection state and all reads.
+
+  **`feeCurrency` must be `MINIPAY_FEE_CURRENCY` (USDm), never the payment token (COPm)** — also
+  confirmed on a real device. COPm is a legitimate fee currency at the Celo protocol level
+  (registered in Celo Sepolia's `FeeCurrencyDirectory`, `0x9212Fb72ae65367A7c887eC4Ad9bE310BAC611BF`
+  — checked directly with `getCurrencies()`), but passing it as `feeCurrency` from inside MiniPay
+  produces the exact same "insufficient funds, have 0 want <gas cost>" native-CELO error as leaving
+  `feeCurrency` off entirely — MiniPay's own wallet only seems to implement fee abstraction for its
+  documented "blessed" tokens (USDm/USDC/USDT), regardless of what the protocol-level allowlist says.
+  Switching only the `feeCurrency` field to USDm (keeping the `approve()` call's token/amount as
+  COPm) fixed it immediately, with no other change. **Consequence**: a passenger needs a small USDm
+  balance in addition to their COPm, purely to cover the network fee — worth a low-balance explainer
+  or a deposit-deeplink redirect for USDm specifically before this ships (see `minipay-requirements.md`
+  → Currency & Stablecoin Logic).
 
 Known gaps: no phone-number identity yet (shows a truncated `0x…` address, which MiniPay only
 allows as a secondary hint, not primary — see `minipay-guide.md` → ODIS/FederatedAttestations for
-the real fix); footer support/ToS links are placeholders; not yet deployed anywhere (no Celo Sepolia
-or Mainnet `VIA_Operator` address to point it at — that's the next step).
+the real fix); no low-balance redirect to MiniPay's Deposit deeplink yet; no stats/analytics page;
+not yet deployed anywhere (no Celo Sepolia or Mainnet `VIA_Operator` address to point it at — that's
+the next step).
 
 ### Networks
 
@@ -262,8 +377,15 @@ testnet step before mainnet.
 Verified payment-token addresses (checked on-chain via Blockscout, not just docs — don't reuse an
 address from a reference file without independently re-verifying, see next section):
 - COPm, Celo mainnet: `0x8A567e2aE79CA692Bd748aB832081C45de4041eA`
-- USDm, Celo Sepolia (stand-in for COPm, since COPm has no Mento v3 deployment there yet):
+- COPm, Celo Sepolia (the Mento v2 deployment — verified via a wallet's actual token holdings on
+  Blockscout after a real swap, not a reference file): `0x5F8d55c3627d2dc0a2B4afa798f877242F382F67`
+- USDm, Celo Sepolia (no longer the payment token, but still the required `feeCurrency` for the
+  MiniPay top-up transaction — see Frontend Architecture above):
   `0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b`
+- FeeCurrencyDirectory, Celo Sepolia (queried directly with `getCurrencies()` to confirm which
+  tokens are valid `feeCurrency` values at the protocol level — COPm is in this list, even though
+  MiniPay's own wallet doesn't actually support it as one, see above):
+  `0x9212Fb72ae65367A7c887eC4Ad9bE310BAC611BF`
 
 ### `.agents/skills/celopedia-skill` — Celo reference skill, verify before trusting
 

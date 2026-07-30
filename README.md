@@ -80,14 +80,29 @@ forge fmt --check        # formatting check (CI runs this)
 ```
 
 Deployment resolves the payment token and treasury per network via `script/HelperConfig.s.sol` — no
-addresses are hardcoded. Copy `.env.example` to `.env` and fill in `PRIVATE_KEY` (and `TREASURY_ADDRESS`
-for Sepolia/Mainnet — not needed for a local Anvil deploy, which uses a mock token and test treasury
-automatically):
+addresses are hardcoded. Copy `.env.example` to `.env` and fill in `TREASURY_ADDRESS` (needed for
+Sepolia/Mainnet; a local Anvil deploy uses a mock token and test treasury automatically).
+
+**Local (Anvil)** — `PRIVATE_KEY` in `.env` is fine here, it's just one of Anvil's well-known
+throwaway test keys with no real funds:
 
 ```bash
 anvil                                                            # local chain, in its own terminal
 forge script script/Deploy.s.sol --rpc-url http://localhost:8545 --broadcast   # local
-forge script script/Deploy.s.sol --rpc-url celo_sepolia --broadcast --verify   # testnet
+```
+
+**Celo Sepolia / Mainnet** — a real private key never touches `.env`. Import it once into an
+encrypted Foundry keystore (prompts for the key and an encryption password interactively; nothing
+is written in plaintext):
+
+```bash
+cast wallet import via-deployer --interactive
+```
+
+Then deploy by name — Foundry prompts for the keystore password at broadcast time:
+
+```bash
+forge script script/Deploy.s.sol --rpc-url celo_sepolia --account via-deployer --sender <YOUR_ADDRESS> --broadcast --verify
 ```
 
 `rpc_endpoints` and `[etherscan]` for `celo_sepolia` and `celo` are preconfigured in `foundry.toml`.
@@ -136,8 +151,10 @@ TLS-only and don't recognize Anvil's or Celo's chain IDs.
 
 "VIA Pay" — balance, a bounded top-up (approve exactly N rides' worth, never an unlimited allowance),
 and recent fare history, built to run inside [MiniPay](https://www.opera.com/products/minipay),
-Celo's stablecoin wallet. Plain [viem](https://viem.sh) talking to `window.ethereum` directly — no
-wagmi/RainbowKit, to keep the bundle under MiniPay's 2MB limit.
+Celo's stablecoin wallet. [wagmi](https://wagmi.sh) (`injected()` connector, no RainbowKit — its
+multi-wallet modal breaks MiniPay's required zero-click auto-connect) for connection state and
+reads, plus a direct [viem](https://viem.sh) wallet client for the one fee-currency-sensitive
+transaction (see `CLAUDE.md` for why).
 
 ```bash
 cd frontend
@@ -146,10 +163,14 @@ cp .env.local.example .env.local   # NEXT_PUBLIC_RPC_URL, NEXT_PUBLIC_OPERATOR_A
 npm run dev
 ```
 
-MiniPay requires a physical device and HTTPS — `localhost` doesn't work there:
+MiniPay requires a physical device and HTTPS — `localhost` doesn't work there. **Use a production
+build, not `npm run dev`** — confirmed on a real device that Next's dev server (HMR/Fast Refresh)
+breaks React re-rendering inside MiniPay's WebView (the page paints once and then freezes, even
+though the underlying JS keeps running):
 
 ```bash
-npx ngrok http 3000
+npm run build && npm run start   # PORT=3001 npm run start to run alongside a dev server
+npx ngrok http 3000              # or 3001, matching whatever port start used
 ```
 
 Open the ngrok HTTPS URL inside MiniPay (Settings → About → tap Version 7× to unlock Developer
@@ -166,10 +187,12 @@ testnet step before mainnet.
 | RPC | `https://forno.celo-sepolia.celo-testnet.org` | `https://forno.celo.org` |
 | Explorer | [celo-sepolia.blockscout.com](https://celo-sepolia.blockscout.com) | [celoscan.io](https://celoscan.io) |
 | Faucet | [faucet.celo.org](https://faucet.celo.org) | — |
-| Payment token | USDm `0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b` *(stand-in — see note)* | COPm `0x8A567e2aE79CA692Bd748aB832081C45de4041eA` |
+| Payment token | COPm `0x5F8d55c3627d2dc0a2B4afa798f877242F382F67` | COPm `0x8A567e2aE79CA692Bd748aB832081C45de4041eA` |
 
-> Celo Sepolia has no live Mento v3 COPm deployment yet, so USDm stands in for testing there;
-> `HelperConfig.s.sol` resolves the correct token automatically per network.
+> Celo Sepolia has no Mento **v3** COPm deployment, but the **v2** one is live with real liquidity;
+> `HelperConfig.s.sol` resolves the correct address automatically per network. The MiniPay Mini App
+> pays its network fee in USDm regardless of network — MiniPay's wallet only supports fee abstraction
+> for a fixed set of tokens, which doesn't include COPm (see `CLAUDE.md`).
 
 ## Project Status
 
