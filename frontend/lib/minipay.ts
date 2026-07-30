@@ -1,5 +1,5 @@
-import { createPublicClient, createWalletClient, custom, http } from "viem";
-import { chain, rpcUrl } from "./config";
+import { createWalletClient, custom } from "viem";
+import { chain } from "./config";
 
 declare global {
   interface Window {
@@ -15,15 +15,17 @@ export function isMiniPay(): boolean {
   return typeof window !== "undefined" && window.ethereum?.isMiniPay === true;
 }
 
-/** Cliente de solo lectura contra el RPC configurado (no depende de una wallet inyectada). */
-export function getPublicClient() {
-  return createPublicClient({ chain, transport: http(rpcUrl) });
+/** true si hay algun proveedor EIP-1193 inyectado (MiniPay u otro, p.ej. una extension de escritorio). */
+export function hasInjectedProvider(): boolean {
+  return typeof window !== "undefined" && window.ethereum !== undefined;
 }
 
 /**
- * Cliente de escritura contra la wallet inyectada (MiniPay u otra compatible con window.ethereum).
- * Devuelve null si no hay wallet inyectada — el llamador debe manejar ese caso (fuera de MiniPay,
- * en un navegador de escritorio sin extension, por ejemplo).
+ * Cliente de escritura directo (viem + custom(window.ethereum)), fuera de wagmi.
+ * Necesario para transacciones con feeCurrency: wagmi's useSendTransaction envio la tx como legacy
+ * sin feeCurrency dentro de MiniPay (confirmado — el nodo pidio CELO nativo, no la stablecoin), pero
+ * un walletClient construido asi si aplica el formatter CIP-64 de la chain de Celo correctamente.
+ * Mismo patron que minipay-guide.md (Celo skill) usa para "Send Stablecoin Payment".
  */
 export function getWalletClient() {
   if (typeof window === "undefined" || !window.ethereum) return null;

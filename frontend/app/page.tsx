@@ -1,10 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
 import { encodeFunctionData, formatUnits } from "viem";
-import { chain, operatorAddress, isConfigured, DEFAULT_ZONE_ID, DEPLOY_BLOCK } from "@/lib/config";
+import {
+  useAccount,
+  useConnect,
+  useReadContract,
+  useReadContracts,
+  usePublicClient,
+} from "wagmi";
+import {
+  chain,
+  operatorAddress,
+  isConfigured,
+  DEFAULT_ZONE_ID,
+  DEPLOY_BLOCK,
+  MINIPAY_FEE_CURRENCY,
+} from "@/lib/config";
 import { erc20Abi, operatorAbi } from "@/lib/abi";
-import { getPublicClient, getWalletClient, isMiniPay } from "@/lib/minipay";
+import { isMiniPay, hasInjectedProvider, getWalletClient } from "@/lib/minipay";
 
 type Fare = {
   txHash: string;
@@ -14,95 +30,86 @@ type Fare = {
   timestamp: bigint;
 };
 
-type TokenInfo = {
-  address: `0x${string}`;
-  symbol: string;
-  decimals: number;
-};
-
 // Recargas preconfiguradas, en numero de pasajes de la zona por defecto — la aprobacion queda
 // acotada a un monto concreto en vez de un allowance ilimitado (ver CLAUDE.md, seccion de seguridad).
 const TOP_UP_RIDES = [5, 10, 20];
 
 export default function Home() {
-  const [address, setAddress] = useState<`0x${string}` | null>(null);
-  const [connecting, setConnecting] = useState(true);
+  const { address, isConnected } = useAccount();
+  const { connect, connectors, isPending: connectPending } = useConnect();
+  const publicClient = usePublicClient();
+
+  const [checkedWallet, setCheckedWallet] = useState(false);
   const [walletMissing, setWalletMissing] = useState(false);
-
-  const [token, setToken] = useState<TokenInfo | null>(null);
-  const [balance, setBalance] = useState<bigint | null>(null);
-  const [allowance, setAllowance] = useState<bigint | null>(null);
-  const [zonePrice, setZonePrice] = useState<bigint | null>(null);
+  const [providerCheckAttempts, setProviderCheckAttempts] = useState(0);
   const [fares, setFares] = useState<Fare[]>([]);
-
+  const [addressCopied, setAddressCopied] = useState(false);
   const [pendingRides, setPendingRides] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // --- Conexion: auto-connect dentro de MiniPay, boton explicito fuera de ella. ---
-  const connect = useCallback(async () => {
-    const wallet = getWalletClient();
-    if (!wallet) {
-      setWalletMissing(true);
-      setConnecting(false);
+  // --- Conexion: auto-connect dentro de MiniPay, boton explicito fuera de ella (zero-click connect). ---
+  // Algunos wallets (MiniPay incluido) inyectan window.ethereum despues del primer render, no antes —
+  // reintenta por ~4s en vez de decidir "sin wallet" en la primera revision.
+  useEffect(() => {
+    const MAX_ATTEMPTS = 20;
+    if (hasInjectedProvider()) {
+      if (isMiniPay()) {
+        connect({ connector: connectors[0] });
+      }
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCheckedWallet(true);
       return;
     }
-    try {
-      const accounts = isMiniPay()
-        ? await wallet.getAddresses()
-        : await wallet.requestAddresses();
-      if (accounts[0]) setAddress(accounts[0]);
-    } catch {
-      setError("No se pudo conectar la wallet.");
-    } finally {
-      setConnecting(false);
+    if (providerCheckAttempts >= MAX_ATTEMPTS) {
+      setWalletMissing(true);
+      setCheckedWallet(true);
+      return;
     }
-  }, []);
+    const timer = setTimeout(() => setProviderCheckAttempts((n) => n + 1), 200);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerCheckAttempts]);
 
-  useEffect(() => {
-    if (isMiniPay()) {
-      // Auto-connect on mount; setState in connect() runs after an await, not synchronously here.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      void connect();
-    } else {
-      setConnecting(false);
-    }
-  }, [connect]);
+  // --- Datos on-chain: token de pago, saldo, aprobacion, precio de zona (via wagmi). ---
+  const { data: tokenAddress } = useReadContract({
+    address: operatorAddress,
+    abi: operatorAbi,
+    functionName: "getPaymentToken",
+  });
 
-  // --- Datos on-chain: token de pago, saldo, aprobacion, precio de zona, historial. ---
-  const refresh = useCallback(async () => {
-    if (!address) return;
-    const client = getPublicClient();
+  const { data: tokenData, refetch: refetchTokenData } = useReadContracts({
+    allowFailure: false,
+    contracts:
+      address && tokenAddress
+        ? ([
+            { address: tokenAddress, abi: erc20Abi, functionName: "symbol" },
+            { address: tokenAddress, abi: erc20Abi, functionName: "decimals" },
+            { address: tokenAddress, abi: erc20Abi, functionName: "balanceOf", args: [address] },
+            {
+              address: tokenAddress,
+              abi: erc20Abi,
+              functionName: "allowance",
+              args: [address, operatorAddress],
+            },
+            {
+              address: operatorAddress,
+              abi: operatorAbi,
+              functionName: "getZonePrice",
+              args: [DEFAULT_ZONE_ID],
+            },
+          ] as const)
+        : [],
+    // Un validador puede cobrar un pasaje en cualquier momento fuera de la app (tap en el bus) —
+    // sin polling, el saldo/allowance quedarian obsoletos hasta que el usuario cierre y reabra.
+    query: { enabled: Boolean(address && tokenAddress), refetchInterval: 3000 },
+  });
 
-    const tokenAddress = await client.readContract({
-      address: operatorAddress,
-      abi: operatorAbi,
-      functionName: "getPaymentToken",
-    });
+  const [symbol, decimals, balance, allowance, zonePrice] = tokenData ?? [];
 
-    const [symbol, decimals, bal, allow, price] = await Promise.all([
-      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "symbol" }),
-      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "decimals" }),
-      client.readContract({ address: tokenAddress, abi: erc20Abi, functionName: "balanceOf", args: [address] }),
-      client.readContract({
-        address: tokenAddress,
-        abi: erc20Abi,
-        functionName: "allowance",
-        args: [address, operatorAddress],
-      }),
-      client.readContract({
-        address: operatorAddress,
-        abi: operatorAbi,
-        functionName: "getZonePrice",
-        args: [DEFAULT_ZONE_ID],
-      }),
-    ]);
-
-    setToken({ address: tokenAddress, symbol, decimals });
-    setBalance(bal);
-    setAllowance(allow);
-    setZonePrice(price);
-
-    const logs = await client.getLogs({
+  // --- Historial: eventos FarePaid del pasajero conectado. ---
+  const refreshFares = useCallback(async () => {
+    if (!address || !publicClient) return;
+    const logs = await publicClient.getLogs({
       address: operatorAddress,
       event: operatorAbi[2],
       args: { user: address },
@@ -121,17 +128,23 @@ export default function Home() {
         }))
         .reverse(),
     );
-  }, [address]);
+  }, [address, publicClient]);
 
   useEffect(() => {
-    // Fetch on-chain data when the address changes; same async-after-await reasoning as above.
+    // Fetch on-chain data when the address changes; setFares runs after an await, not synchronously here.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
-  }, [refresh]);
+    void refreshFares();
+
+    // Igual que el saldo/allowance arriba: un cobro fuera de la app no dispara ningun re-render por
+    // si solo, asi que hay que re-consultar los logs periodicamente para que el historial se actualice
+    // sin que el usuario tenga que cerrar y volver a abrir la MiniApp.
+    const interval = setInterval(() => void refreshFares(), 3000);
+    return () => clearInterval(interval);
+  }, [refreshFares]);
 
   // --- Recarga: aprueba exactamente el monto de N pasajes (no un allowance ilimitado). ---
   async function topUp(rides: number) {
-    if (!address || !token || !zonePrice) return;
+    if (!address || !tokenAddress || zonePrice === undefined) return;
     const wallet = getWalletClient();
     if (!wallet) return;
 
@@ -145,25 +158,26 @@ export default function Home() {
         args: [operatorAddress, amount],
       });
 
-      // token.address == feeCurrency para tokens Mento de 18 decimales (COPm/USDm). USDC/USDT
-      // necesitarian la direccion adaptadora en vez de la del token — ver builder-guide.md.
+      // La red fee siempre se paga en USDm, no en el token de pasajes (COPm) — ver MINIPAY_FEE_CURRENCY.
       await wallet.sendTransaction({
         account: address,
-        to: token.address,
+        to: tokenAddress,
         data,
-        feeCurrency: token.address,
+        feeCurrency: MINIPAY_FEE_CURRENCY,
       });
 
-      await refresh();
+      await Promise.all([refetchTokenData(), refreshFares()]);
     } catch {
-      setError("La recarga no se pudo completar. Intenta de nuevo.");
+      setError("La recarga no se pudo completar. Verifica que tengas saldo de USDm para la red fee.");
     } finally {
       setPendingRides(null);
     }
   }
 
   const ridesRemaining =
-    allowance !== null && zonePrice !== null && zonePrice > 0n ? allowance / zonePrice : null;
+    allowance !== undefined && zonePrice !== undefined && zonePrice > 0n
+      ? allowance / zonePrice
+      : null;
 
   if (!isConfigured()) {
     return (
@@ -176,11 +190,20 @@ export default function Home() {
     );
   }
 
+  const initializing = !checkedWallet || connectPending;
+
   return (
     <div className="flex flex-col flex-1 items-center bg-zinc-50 font-sans dark:bg-black">
       <main className="flex flex-1 w-full max-w-sm flex-col gap-6 px-5 py-10">
         <header className="flex items-center gap-3">
-          <div className="h-9 w-9 shrink-0 rounded-full bg-lime-400 dark:bg-lime-500" aria-hidden />
+          <Image
+            src="/logo.png"
+            alt="Via Network"
+            width={36}
+            height={36}
+            className="h-9 w-9 shrink-0 rounded-full"
+            priority
+          />
           <div>
             <h1 className="text-lg font-semibold text-zinc-900 dark:text-zinc-50">VIA Pay</h1>
             <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -189,17 +212,18 @@ export default function Home() {
           </div>
         </header>
 
-        {connecting && <p className="text-sm text-zinc-500">Conectando…</p>}
+        {initializing && <p className="text-sm text-zinc-500">Conectando…</p>}
 
-        {walletMissing && !connecting && (
+        {!initializing && walletMissing && (
           <p className="rounded-lg bg-zinc-100 p-4 text-sm text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
             Abre esta pagina dentro de MiniPay para continuar.
           </p>
         )}
 
-        {!connecting && !address && !walletMissing && (
+        {/* Boton manual solo fuera de MiniPay — nunca mostrar "Conectar" dentro de MiniPay (zero-click connect). */}
+        {!initializing && !walletMissing && !isConnected && !isMiniPay() && (
           <button
-            onClick={connect}
+            onClick={() => connect({ connector: connectors[0] })}
             className="rounded-full bg-zinc-900 px-5 py-3 text-sm font-medium text-white dark:bg-zinc-50 dark:text-zinc-900"
           >
             Conectar
@@ -211,12 +235,22 @@ export default function Home() {
             <section className="rounded-xl bg-white p-5 shadow-sm dark:bg-zinc-900">
               <p className="text-xs uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Saldo</p>
               <p className="mt-1 text-3xl font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
-                {balance !== null && token ? formatUnits(balance, token.decimals) : "—"}{" "}
-                <span className="text-lg text-zinc-500 dark:text-zinc-400">{token?.symbol}</span>
+                {balance !== undefined && decimals !== undefined ? formatUnits(balance, decimals) : "—"}{" "}
+                <span className="text-lg text-zinc-500 dark:text-zinc-400">{symbol}</span>
               </p>
-              <p className="mt-3 text-xs text-zinc-400">
-                Cuenta: {address.slice(0, 6)}…{address.slice(-4)}
-              </p>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(address).then(() => {
+                    setAddressCopied(true);
+                    setTimeout(() => setAddressCopied(false), 2000);
+                  });
+                }}
+                className="mt-3 text-xs text-zinc-400 underline decoration-dotted underline-offset-2"
+              >
+                {addressCopied
+                  ? "Direccion copiada"
+                  : `Cuenta: ${address.slice(0, 6)}…${address.slice(-4)} (toca para copiar)`}
+              </button>
             </section>
 
             <section className="rounded-xl bg-white p-5 shadow-sm dark:bg-zinc-900">
@@ -255,7 +289,7 @@ export default function Home() {
                       Bus {fare.busId.toString()} · Zona {fare.zoneId.toString()}
                     </span>
                     <span className="tabular-nums text-zinc-900 dark:text-zinc-50">
-                      -{token ? formatUnits(fare.amount, token.decimals) : fare.amount.toString()}
+                      -{decimals !== undefined ? formatUnits(fare.amount, decimals) : fare.amount.toString()}
                     </span>
                   </li>
                 ))}
@@ -264,9 +298,19 @@ export default function Home() {
           </>
         )}
 
-        <footer className="mt-auto pt-6 text-center text-xs text-zinc-400">
-          Via Network · Operado por Via Network SAS
-          {/* TODO: enlaces reales de soporte y Terminos/Privacidad antes de enviar a revision de MiniPay */}
+        <footer className="mt-auto flex flex-col items-center gap-2 pt-6 text-center text-xs text-zinc-400">
+          <p>Via Network · Operado por Via Network SAS</p>
+          <nav className="flex gap-3 underline-offset-2">
+            <a href="https://t.me/Le0_130" target="_blank" rel="noopener noreferrer" className="hover:underline">
+              Soporte
+            </a>
+            <Link href="/tos" className="hover:underline">
+              Terminos
+            </Link>
+            <Link href="/privacy" className="hover:underline">
+              Privacidad
+            </Link>
+          </nav>
         </footer>
       </main>
     </div>

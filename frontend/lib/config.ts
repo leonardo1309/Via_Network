@@ -19,3 +19,14 @@ export const DEFAULT_ZONE_ID = 1n;
 // Bloque de despliegue del operador, para no escanear eventos desde el bloque 0 (ver network-info.md
 // sobre el limite de 50,000 bloques por eth_getLogs). Ajusta esto tras cada deploy nuevo.
 export const DEPLOY_BLOCK = BigInt(process.env.NEXT_PUBLIC_DEPLOY_BLOCK ?? "0");
+
+// USDm — usado como feeCurrency (paga la red fee), NO como token de pasajes (ese es COPm, ver
+// VIA_Operator.getPaymentToken). Confirmado en dispositivo real: MiniPay solo procesa fee abstraction
+// para su lista "bendecida" de tokens (USDm/USDC/USDT) — pasarle COPm como feeCurrency silenciosamente
+// cae a exigir CELO nativo (que MiniPay oculta y el pasajero no tiene), aunque COPm si sea un fee
+// currency valido a nivel de protocolo Celo (registrado en FeeCurrencyDirectory). El pasajero necesita
+// entonces un poco de USDm ademas de su saldo de COPm, solo para cubrir la red fee.
+export const MINIPAY_FEE_CURRENCY =
+  process.env.NEXT_PUBLIC_CHAIN === "mainnet"
+    ? "0x765DE816845861e75A25fCA122bb6898B8B1282a"
+    : "0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b";
