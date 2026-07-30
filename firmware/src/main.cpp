@@ -94,14 +94,19 @@ bool validateConfig() {
 /**
  * @brief Extrae el valor de un campo string de una respuesta JSON-RPC, sin parsear JSON completo.
  * @dev Suficiente para respuestas de nodo Ethereum (`{"result":"0x..."}`) que siempre traen el valor
- * entre comillas; no soporta objetos/arreglos anidados como valor.
+ * entre comillas; no soporta objetos/arreglos anidados como valor. `searchFrom`/`endPosOut` permiten
+ * extraer la misma clave mas de una vez en una respuesta batch (un arreglo de varios objetos JSON-RPC,
+ * uno por cada llamada del lote) sin volver a escanear desde el principio ni confundir un valor con
+ * una coincidencia parcial de otro.
  * @param json Cuerpo de la respuesta JSON-RPC completa.
  * @param field Nombre del campo a buscar (p.ej. "result").
+ * @param searchFrom Posicion desde donde empezar la busqueda (0 para la primera ocurrencia).
+ * @param endPosOut [out, opcional] Posicion justo despues del valor extraido.
  * @return El valor entre comillas, o "" si no se encontro.
  */
-String extractQuotedJsonField(const String& json, const char* field) {
+String extractQuotedJsonField(const String& json, const char* field, int searchFrom = 0, int* endPosOut = nullptr) {
   String key = String("\"") + field + "\":";
-  int keyPos = json.indexOf(key);
+  int keyPos = json.indexOf(key, searchFrom);
   if (keyPos < 0) {
     return "";
   }
@@ -114,6 +119,10 @@ String extractQuotedJsonField(const String& json, const char* field) {
   int secondQuote = json.indexOf('"', firstQuote + 1);
   if (secondQuote < 0) {
     return "";
+  }
+
+  if (endPosOut != nullptr) {
+    *endPosOut = secondQuote + 1;
   }
 
   return json.substring(firstQuote + 1, secondQuote);
@@ -212,6 +221,12 @@ String getRpcUrl() {
  * @return true si la request HTTP y la respuesta JSON-RPC fueron exitosas (sin campo "error").
  */
 bool rpcCall(const String& method, const String& params, String& resultOut) {
+  // client se declara antes que http (y por lo tanto se destruye despues, en orden inverso de
+  // declaracion) — http.begin(client, ...) guarda una referencia a client, y el destructor de
+  // HTTPClient la usa; si client vive en un scope mas angosto (p.ej. dentro del if de abajo) queda
+  // destruido antes que http, y ese destructor termina leyendo memoria de pila ya liberada (crash
+  // real confirmado en dispositivo: "Guru Meditation Error (LoadProhibited)" en ~HTTPClient()).
+  WiFiClientSecure client;
   HTTPClient http;
   const String payload =
       String("{\"jsonrpc\":\"2.0\",\"method\":\"") + method +
@@ -222,7 +237,6 @@ bool rpcCall(const String& method, const String& params, String& resultOut) {
   const String url = getRpcUrl();
 
   if (RPC_USE_TLS) {
-    WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(15000);
 
@@ -273,18 +287,89 @@ bool rpcCall(const String& method, const String& params, String& resultOut) {
 }
 
 /**
- * @brief Consulta el nonce "pending" de una direccion, para poder firmar la siguiente transaccion.
- * @param fromAddress Direccion (con 0x) cuyo nonce se quiere consultar.
- * @return El nonce como entero, o 0 si la consulta RPC fallo (ver log de [RPC ERROR] en Serial).
+ * @brief Consulta el nonce "pending" y el gas price actual en una sola peticion HTTP (JSON-RPC batch:
+ * un arreglo con dos llamadas en vez de dos peticiones separadas).
+ * @dev Cada llamada a rpcCall() implica un handshake TLS completo (RPC_USE_TLS=true en testnet) desde
+ * el ESP32, que es lento en este hardware — juntar ambas consultas en un solo POST ahorra un
+ * handshake completo por cada tap. GAS_PRICE en config.h queda solo como valor de respaldo si la
+ * consulta falla — un precio fijo se vuelve obsoleto (confirmado: la red pedia 52.5 Gwei mientras
+ * GAS_PRICE tenia 20 Gwei fijo, causando que la transaccion firmada quedara aceptada en el mempool
+ * pero nunca minada, sin ningun error explicito — ni el nodo ni collectFare() lo detectaban).
+ * @param fromAddress Direccion (con 0x) del validador cuyo nonce se consulta.
+ * @param nonceOut [out] Nonce pending, o 0 si la consulta fallo.
+ * @param gasPriceOut [out] Gas price de la red + 20% de margen, o GAS_PRICE de respaldo si la consulta fallo.
+ * @return true si la peticion HTTP y ambas respuestas del lote fueron exitosas.
  */
-uint32_t getPendingNonce(const String& fromAddress) {
-  String result;
-  const String params = String("[\"") + fromAddress + "\",\"pending\"]";
-  if (!rpcCall("eth_getTransactionCount", params, result)) {
-    return 0;
+bool getNonceAndGasPrice(const String& fromAddress, uint32_t& nonceOut, unsigned long long& gasPriceOut) {
+  nonceOut = 0;
+  gasPriceOut = GAS_PRICE;
+
+  // client antes que http — ver la nota en rpcCall() sobre el orden de destruccion.
+  WiFiClientSecure client;
+  HTTPClient http;
+  const String payload =
+      String("[{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionCount\",\"params\":[\"") +
+      fromAddress + "\",\"pending\"],\"id\":1},"
+      "{\"jsonrpc\":\"2.0\",\"method\":\"eth_gasPrice\",\"params\":[],\"id\":2}]";
+
+  int status = -1;
+  String response;
+  const String url = getRpcUrl();
+
+  if (RPC_USE_TLS) {
+    client.setInsecure();
+    client.setTimeout(15000);
+
+    if (!http.begin(client, url)) {
+      Serial.println("[RPC ERROR] No se pudo inicializar la conexion HTTPS para el lote nonce/gasPrice.");
+      return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    status = http.POST(payload);
+    if (status > 0) {
+      response = http.getString();
+    }
+    http.end();
+  } else {
+    if (!http.begin(url)) {
+      Serial.println("[RPC ERROR] No se pudo inicializar la conexion HTTP para el lote nonce/gasPrice.");
+      return false;
+    }
+
+    http.addHeader("Content-Type", "application/json");
+    status = http.POST(payload);
+    if (status > 0) {
+      response = http.getString();
+    }
+    http.end();
   }
 
-  return strtoul(result.c_str(), nullptr, 16);
+  if (status <= 0) {
+    Serial.printf("[RPC ERROR] POST (lote) fallo con codigo %d\n", status);
+    return false;
+  }
+
+  if (response.indexOf("\"error\"") >= 0) {
+    Serial.print("[RPC ERROR] Respuesta del lote: ");
+    Serial.println(response);
+    return false;
+  }
+
+  int posAfterNonce = 0;
+  String nonceHex = extractQuotedJsonField(response, "result", 0, &posAfterNonce);
+  String gasPriceHex = extractQuotedJsonField(response, "result", posAfterNonce);
+
+  if (nonceHex.length() == 0 || gasPriceHex.length() == 0) {
+    Serial.print("[RPC ERROR] Respuesta del lote incompleta: ");
+    Serial.println(response);
+    return false;
+  }
+
+  nonceOut = strtoul(nonceHex.c_str(), nullptr, 16);
+  unsigned long long networkGasPrice = strtoull(gasPriceHex.c_str(), nullptr, 16);
+  gasPriceOut = networkGasPrice + (networkGasPrice / 5);
+  return true;
 }
 
 /**
@@ -314,7 +399,14 @@ void collectFare(const char* userAddress, uint256_t busId, uint256_t zoneId) {
     KeyID keyId(&web3, privateKeyHex);
     const string from = keyId.getAddress();
 
-    uint32_t nonce = getPendingNonce(from.c_str());
+    uint32_t nonce;
+    unsigned long long gasPrice;
+    getNonceAndGasPrice(String(from.c_str()), nonce, gasPrice);
+    Serial.print("[Web3] Nonce: ");
+    Serial.print(nonce);
+    Serial.print(" — Gas price a usar: ");
+    Serial.print((uint32_t)(gasPrice / 1000000000ULL));
+    Serial.println(" Gwei");
 
     Serial.println("[Web3] Firmando transacción...");
     string user(userAddress);
@@ -322,7 +414,7 @@ void collectFare(const char* userAddress, uint256_t busId, uint256_t zoneId) {
 
     string to(CONTRACT_ADDRESS);
     uint256_t value = 0;
-    string signedTx = contract.SignTransaction(nonce, GAS_PRICE, GAS_LIMIT, &to, &value, &data);
+    string signedTx = contract.SignTransaction(nonce, gasPrice, GAS_LIMIT, &to, &value, &data);
 
     if (signedTx.rfind("0x", 0) != 0) {
       signedTx = "0x" + signedTx;
@@ -373,8 +465,9 @@ void loop(void) {
     Serial.println("¡Pasajero detectado!");
     
     // En el futuro, mapearemos este UID a una dirección real del pasajero.
-    // Usa una dirección de pasajero válida en la red objetivo.
-    const char* direccionPasajero = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    // Wallet real de MiniPay del pasajero de prueba (no la de MetaMask/deployer, para probar el
+    // approve() real hecho desde la MiniApp, no por CLI).
+    const char* direccionPasajero = "0x0c3eF153D16a760e1C6a9A2c1223b0058e3332D7";
 
     // Bus y zona de prueba (ver VIA_Operator.getZonePrice — zona 1 = Urbano).
     uint256_t busId = BUS_ID;
