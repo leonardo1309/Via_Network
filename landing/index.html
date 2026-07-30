@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Via Network — Built on Celo</title>
 <meta name="description" content="Via Network: validador físico de código abierto que liquida el pasaje de transporte público directamente en Celo.">
-<meta name="talentapp:project_verification" content="450d3e27569d4f80860b9e813e9ba7bdbbb89829d7a3b8f8165afe45ad662105eef75fab7d9ba1fa1b08579999974a3b2e03de9b89798c15a8c5e7d102d51a2a">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -185,7 +184,7 @@
     content:"";
     position:absolute;
     top:16px; left:0; right:0; height:2px;
-    background:linear-gradient(90deg, var(--teal-600), var(--teal-400) 55%, var(--line) 55%, var(--line));
+    background:linear-gradient(90deg, var(--teal-600), var(--teal-400) 38%, var(--line) 38%, var(--line));
   }
   .stop{
     position:relative;
@@ -305,7 +304,7 @@
       <div class="layer">
         <span class="idx">02 — cadena</span>
         <h3>Contratos</h3>
-        <p>Lógica de liquidación entre pasajero y operador, desplegada y probada localmente antes de salir a testnet.</p>
+        <p>Liquidación directa en COPm (stablecoin de peso colombiano de Mento) entre pasajero y operador — sin fricción cambiaria, completamente probado.</p>
         <div class="tags">
           <span class="tag">Solidity</span>
           <span class="tag">Foundry</span>
@@ -317,8 +316,8 @@
         <h3>Interfaz</h3>
         <p>MiniApp embebida en la wallet MiniPay — el pasajero paga desde donde ya guarda su saldo, sin instalar nada nuevo.</p>
         <div class="tags">
-          <span class="tag">Flutter Web</span>
-          <span class="tag">web3dart</span>
+          <span class="tag">Next.js</span>
+          <span class="tag">wagmi</span>
           <span class="tag">MiniPay</span>
         </div>
       </div>
@@ -333,14 +332,20 @@
         <div class="stop done">
           <span class="node"></span>
           <span class="stop-label">HECHO</span>
-          <h4>Validador local</h4>
-          <p>Firma y llamada JSON-RPC funcionando entre el ESP32 y un nodo Anvil.</p>
+          <h4>Contratos y validador</h4>
+          <p><code>VIA_Operator</code> completo y probado; firmware validado end-to-end contra un ESP32 real.</p>
+        </div>
+        <div class="stop done">
+          <span class="node"></span>
+          <span class="stop-label">HECHO</span>
+          <h4>MiniApp en Celo Sepolia</h4>
+          <p>Prueba de punta a punta completada dentro de MiniPay, en la testnet vigente tras la migración de Celo a L2.</p>
         </div>
         <div class="stop active">
           <span class="node"></span>
           <span class="stop-label">EN CURSO</span>
-          <h4>Testnet Alfajores</h4>
-          <p>Migración del contrato y del firmware fuera del entorno local.</p>
+          <h4>Firma EIP-712 del validador</h4>
+          <p>Path de firma off-chain para el relayer, en desarrollo.</p>
         </div>
         <div class="stop pending">
           <span class="node"></span>
