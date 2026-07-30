@@ -10,8 +10,15 @@ contract DeployVIA is Script {
         HelperConfig helperConfig = new HelperConfig();
         (address paymentToken, address treasury) = helperConfig.activeNetworkConfig();
 
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        vm.startBroadcast(deployerPrivateKey);
+        // Anvil local: firma con PRIVATE_KEY (una cuenta de prueba publica de Anvil, sin fondos
+        // reales en riesgo). Celo Sepolia/Mainnet: sin argumentos — firma con un keystore cifrado
+        // via `--account <nombre> --sender <direccion>` (ver README), para no exponer una llave
+        // real en texto plano en .env.
+        if (block.chainid == helperConfig.LOCAL_CHAIN_ID()) {
+            vm.startBroadcast(vm.envUint("PRIVATE_KEY"));
+        } else {
+            vm.startBroadcast();
+        }
         VIA_Operator operator = new VIA_Operator(paymentToken, treasury);
         vm.stopBroadcast();
 

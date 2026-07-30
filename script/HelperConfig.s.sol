@@ -63,11 +63,12 @@ contract HelperConfig is Script {
         });
     }
 
-    /// @notice Configuracion para Celo Sepolia: USDm como stand-in (COPm no tiene despliegue v3 ahi).
-    /// @return Config con el USDm verificado en Blockscout y `TREASURY_ADDRESS` desde variable de entorno.
+    /// @notice Configuracion para Celo Sepolia: COPm real (disponible via Mento V2, aunque V3 aun no
+    /// tiene liquidez ahi — ver CLAUDE.md).
+    /// @return Config con el COPm verificado en Blockscout y `TREASURY_ADDRESS` desde variable de entorno.
     function getCeloSepoliaConfig() public view returns (NetworkConfig memory) {
         return NetworkConfig({
-            paymentToken: 0xdE9e4C3ce781b4bA68120d6261cbad65ce0aB00b, // USDm, verificado en Blockscout
+            paymentToken: 0x5F8d55c3627d2dc0a2B4afa798f877242F382F67, // COPm, verificado en Blockscout
             treasury: vm.envAddress("TREASURY_ADDRESS")
         });
     }

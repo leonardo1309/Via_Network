@@ -40,7 +40,7 @@ contract VIANetworkTest is Test {
 
         // 3. Simular recarga de saldo al pasajero y su aprobación al operador
         // (equivalente a que el pasajero ya haya cargado COPm y aprobado el contrato)
-        paymentToken.mint(pasajero, 10000);
+        paymentToken.mint(pasajero, 10000e18);
         vm.prank(pasajero);
         paymentToken.approve(address(operator), type(uint256).max);
     }
@@ -69,7 +69,7 @@ contract VIANetworkTest is Test {
 
     // TEST 1: Verificar que el pasajero recibió sus tokens
     function test_InitialBalance() public view {
-        assertEq(paymentToken.balanceOf(pasajero), 10000);
+        assertEq(paymentToken.balanceOf(pasajero), 10000e18);
     }
 
     // TEST 2: Cobro de pasaje exitoso (Urbano - Zona 1) — el saldo pasa del pasajero a la tesorería

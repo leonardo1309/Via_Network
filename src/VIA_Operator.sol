@@ -78,8 +78,10 @@ contract VIA_Operator is AccessControl, EIP712 {
         i_paymentToken = IERC20(_paymentToken);
         s_treasury = _treasury;
 
-        s_zonePrices[1] = 1500; // Urbano
-        s_zonePrices[2] = 5200; // Chia-Bogota
+        // Precios en la unidad minima del token (18 decimales para COPm/USDm) — 1500/5200 serian
+        // practicamente cero sin el factor 1e18.
+        s_zonePrices[1] = 1500e18; // Urbano
+        s_zonePrices[2] = 5200e18; // Chia-Bogota
     }
 
     /// @notice El validador cobra el pasaje directamente, pagando su propio gas en CELO nativo.
